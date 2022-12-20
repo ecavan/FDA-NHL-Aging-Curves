@@ -1,0 +1,382 @@
+---
+title: "msc_project"
+output: pdf_document
+date: "2022-11-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(fdapace)
+library(fda)
+library(tidyverse)
+library(plotly)
+library(brolgar)
+library(plot3D)
+library(reticulate)
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(parallel))
+suppressPackageStartupMessages(library(locfit))
+suppressPackageStartupMessages(library(lsei))
+library(QRegVCM)
+source('SOAP-main2/functions_soap.R')
+source('SOAP-main2/mean_function.r')
+source('imFunPCA-master2/lmcensor.r')
+source('imFunPCA-master2/funs_censor.r')
+```
+
+
+
+```{r}
+nhl_stats1 = read.csv(file = 'Data/train_fwd.csv')
+nhl_stats2 = read.csv(file = 'Data/imfunpca_fwd_train.csv')
+```
+
+```{r}
+#nhl_stats$Age = as.numeric(nhl_stats1$Age)
+uid <- unique(nhl_stats1$Player)
+
+N <- length(uid)
+ps <- rep(0,N)
+ages <- rep(0,N)
+deltas <- rep(0,N)
+
+for (k in 1:N){
+  ps[k] <-  nhl_stats1 %>% filter(Player == uid[k]) %>% select(PS_normalized) %>% pull()  %>% list() 
+  ages[k]  <-   nhl_stats1 %>% filter(Player == uid[k]) %>% select(Age)  %>% pull() %>% list() 
+  #deltas[k] <-   nhl_stats1 %>% filter(Player == uid[k]) %>% select(delta)  %>% pull() %>% list() 
+}
+
+df <- tibble( uid, ps, ages)
+```
+
+```{r}
+uid <- unique(nhl_stats2$Player)
+
+N <- length(uid)
+ps <- rep(0,N)
+ages <- rep(0,N)
+deltas <- rep(0,N)
+
+for (k in 1:N){
+  ps[k] <-  nhl_stats2 %>% filter(Player == uid[k]) %>% select(PPG) %>% pull()  %>% list() 
+  ages[k]  <-   nhl_stats2 %>% filter(Player == uid[k]) %>% select(Age)  %>% pull() %>% list() 
+  deltas[k] <-   nhl_stats2 %>% filter(Player == uid[k]) %>% select(delta)  %>% pull() %>% list() 
+}
+
+df2 <- tibble( uid, ps, ages, deltas)
+```
+
+```{r}
+sigma=1
+spline_basis=create.bspline.basis(rangeval=c(22,34),nbasis=6,norder=4)
+meanfit = findmean(observed=df2$ps, timepoints=df2$ages,df2$deltas,minit=6,threshold=1e-8)
+
+mu = eval.fd(seq(22,34,by=1), meanfit$pc_fit)
+```
+
+
+```{r}
+sigma = 1
+#spline_basis=create.bspline.basis(rangeval=c(22,34),nbasis=6,norder=3)
+
+mean_fit_soap = mean_function(rnorm(6), df$ps, df$ages,threshold = 1e-10,minit = 60)
+```
+
+```{r}
+mu_soap = eval.fd(seq(22,34,by=1), mean_fit_soap$mean_fit)
+```
+
+```{r}
+nhl_pca <- FPCA(df$ps,df$ages, list(dataType='Sparse', error=FALSE, verbose=TRUE, kernel='epan',methodBwCov="GCV",methodBwMu="GCV"))
+plot(nhl_pca)
+```
+
+
+```{r}
+plot(seq(22,34,by=1), mu, 'l',col=2, xlab = "Age", ylab = "Normalized PS")
+lines(seq(22,34,by=1), mu_soap, col=3)
+lines(seq(22,34,length.out=51), nhl_pca$mu, 'l', col=1)
+#lines(seq(22,34,length.out=51), nhl_pca2$mu, col=1)
+legend(25,-0.1,c('Mean Func ImFuncPCA','Mean Func PACE', 'Mean Fun Soap'),col=c(2,1,3),lty=1,lwd=5)
+```
+
+
+```{r}
+pred_pace = predict(nhl_pca, df$ps,df$ages,K=2 )
+```
+
+
+```{r}
+pc1s = first_FPC(rnorm(6),df2$ps,df2$ages, delta=df2$deltas,threshold=0.001)
+
+previous_beta = list()
+previous_beta[[1]] = pc1s$beta
+beta3=pc1s$beta
+```
+
+
+```{r}
+pc2s=third_FPC_conditional(beta3, 2,df2$ps,df2$ages, df2$deltas,betalist =previous_beta , threshold=0.016)
+
+```
+
+
+```{r}
+#spline.basis=create.bspline.basis(rangeval=c(22,34),nbasis=length(nhl_pca$workGrid)-4,norder=4)
+coef_mat0 = coef(Data2fd(argvals = nhl_pca$workGrid,y=nhl_pca$phi[,1:2],spline_basis))
+
+#spline_basis=spline.basis
+
+observed <- df$ps
+timepoints <- df$ages
+  
+observed%>%do.call(c,.)%>%mean
+pc1s_soap = first_FPC_soap(rnorm(6),observed=observed, timepoints=timepoints,minit=12,gamma=1e1,threshold=1e-9)
+previous_beta = list()
+previous_beta[[1]] = pc1s_soap$beta
+```
+
+
+```{r}
+pc2s_soap = third_FPC_conditional_soap(coef_mat0[,2], observed=observed, timepoints=timepoints, pc_index=2, gamma=3e4,betalist =previous_beta,threshold=1e-8)
+previous_beta[[2]] = pc2s_soap$beta
+
+#pc2s_soap = first_FPC_soap(rnorm(6),observed=observed, timepoints=timepoints,minit=12,gamma=3e4,threshold=1e-8)
+```
+
+
+```{r}
+pc_score1_soap = eval.fd(seq(22,34,by=1), pc1s_soap$pc_fit)
+pc_score2_soap = eval.fd(seq(22,34,by=1), pc2s_soap$pc_fit)
+
+pc_score2 = eval.fd(seq(22,34,by=1), pc2s$pc_fit)
+pc_score1 = eval.fd(seq(22,34,by=1), pc1s$pc_fit)
+```
+
+```{r}
+plot(seq(22,34,length.out=51), nhl_pca$phi[,1], 'l', xlab = "Age", ylab = "PC Score", main = 'First 2 FPCAs PACE', ylim = c(-1,1))
+lines(seq(22,34,length.out=51), nhl_pca$phi[,2], 'l', col=2)
+legend(26,-0.5,c('PACE PC 1','PACE PC 2'),col=1:2,lty=1,lwd=5)
+```
+
+```{r}
+plot(seq(22,34,length.out=51), nhl_pca$phi[,1], 'l', xlab = "Age", ylab = "PC Score", main = 'First 2 FPCAs PACE', ylim = c(-0.6,0.5))
+lines(seq(22,34,by=1), pc_score1, col=2)
+lines(seq(22,34,by=1), pc_score1_soap, col=3)
+abline(h=0, col=1, lty=2)
+#lines(seq(22,34,length.out=51), nhl_pca$phi[,2], 'l', col=2)
+legend(24,-0.3,c('PACE','ImFuncPCA', 'SOAP'),col=1:3,lty=1,lwd=5)
+```
+
+```{r}
+plot(pred_pace$predGrid, pred_pace$predCurves[1,], 'l', ylim = c(-5,10), main = uid[1])
+points(unlist(df$ages[1]), unlist(df$ps[1]), col=3)
+#plus imfunc#
+lines(seq(22,34,by=1),pc1s$sfit[1]*pc_score1 - pc2s$sfit[1]*pc_score2 + mu, col=2)
+lines(seq(22,34,by=1),pc1s_soap$sfit[1]*pc_score1_soap + pc2s_soap$sfit[1]*pc_score2_soap + mu_soap, col=3)
+```
+
+```{r}
+plot(pred_pace$predGrid, pred_pace$predCurves[100,], 'l', ylim = c(-5,10), main = uid[100], xlab = 'Age', ylab = 'PS')
+points(unlist(df$ages[100]), unlist(df$ps[100]), col=4)
+#plus imfunc#
+lines(seq(22,34,by=1),pc1s$sfit[100]*pc_score1 - pc2s$sfit[100]*pc_score2 + mu, col=2)
+lines(seq(22,34,by=1),pc1s_soap$sfit[100]*pc_score1_soap + pc2s_soap$sfit[100]*pc_score2_soap + mu_soap, col=3)
+legend(30,9,c('PACE','ImFuncPCA', 'SOAP', 'Actual'),col=1:4,lty=1,lwd=5)
+```
+
+```{r}
+##### pace error ##########
+ideal_list<-seq(18,34,by=1)
+temp = 0
+for(i in 1:N){
+  B = df$ages[[i]]
+  #print(B)
+  list1 = pred_pace$predCurves[i,][match(ideal_list,B)]
+  list2 = df$ps[[i]][match(ideal_list,B)]
+  
+  list1 = list1[!is.na(list1)]
+  list2 = list2[!is.na(list2)]
+  
+  error = sum(abs(list2-list1))
+  temp = temp + error
+}
+temp/N
+```
+
+
+```{r}
+###soap error###
+temp = 0
+for(i in 1:N){
+  B = df$ages[[i]]
+  list1 = (pc1s_soap$sfit[i]*pc_score1_soap + pc2s_soap$sfit[i]*pc_score2_soap + mu_soap)[,1][match(ideal_list,B)]
+  list2 = df$ps[[i]][match(ideal_list,B)]
+  
+  list1 = list1[!is.na(list1)]
+  list2 = list2[!is.na(list2)]
+  
+  error = sum(abs(list2-list1))
+  temp = temp + error
+}
+temp/N
+```
+
+```{r}
+######### get imfun error ############
+temp = 0
+for(i in 1:N){
+  B = df$ages[[i]]
+  list1 = (pc1s$sfit[i]*pc_score1 + pc2s$sfit[i]*pc_score2 + mu)[,1][match(ideal_list,B)]
+  list2 = df$ps[[i]][match(ideal_list,B)]
+  
+  list1 = list1[!is.na(list1)]
+  list2 = list2[!is.na(list2)]
+  
+  error = sum(abs(list2-list1))
+  temp = temp + error
+}
+temp/N
+```
+
+####### clustering ##############
+
+```{r}
+cluster_data = data.frame(uid, pred_pace$scores[,1],pred_pace$scores[,2])
+names = c("Player", "PC1", "PC2")
+
+colnames(cluster_data) = names
+
+write.csv(cluster_data, 'cluster_data_D.csv')
+```
+
+####################### derivatives #############################
+
+```{r}
+
+imfd = deriv.fd(meanfit$pc_fit, 1)
+soapd = deriv.fd(mean_fit_soap$mean_fit, 1)
+
+imfd_score = eval.fd(seq(22,34,by=1), imfd)
+soapd_score = eval.fd(seq(22,34,by=1), soapd)
+
+bw <- 1
+kern <- 'epan'
+FPCoptn <- list(bw=bw, kernelType=kern, method='FPC')
+FPC <- FPCAder(nhl_pca, FPCoptn)
+
+plot(seq(22,34,length.out=51),FPC$muDer,'l', col=1, ylim = c(1,-1), xlab = "Age", ylab = "")
+lines(seq(22,34,by=1),imfd_score,col=2)
+lines(seq(22,34,by=1),soapd_score , col=3)
+abline(h=0, col=1, lty=2)
+legend(26,0.5,c('PACE','ImFuncPCA', 'SOAP'),col=1:3,lty=1,lwd=5)
+```
+
+########### test prediction #######################################
+
+
+```{r}
+nhl_stats1_test = read.csv(file = 'Data/test_fwd.csv')
+nhl_stats2_test = read.csv(file = 'Data/imfunpca_fwd_test.csv')
+
+uid_test <- unique(nhl_stats1_test$Player)
+
+N_test <- length(uid_test)
+ps_test <- rep(0,N_test)
+ages_test <- rep(0,N_test)
+deltas_test <- rep(0,N_test)
+
+for (k in 1:N_test){
+  ps_test[k] <-  nhl_stats1_test %>% filter(Player == uid_test[k]) %>% select(PS_normalized) %>% pull()  %>% list() 
+  ages_test[k]  <-   nhl_stats1_test %>% filter(Player == uid_test[k]) %>% select(Age)  %>% pull() %>% list() 
+  #deltas[k] <-   nhl_stats1 %>% filter(Player == uid[k]) %>% select(delta)  %>% pull() %>% list() 
+}
+
+df_test <- tibble( uid_test, ps_test, ages_test)
+```
+
+
+
+```{r}
+uid_test <- unique(nhl_stats2_test$Player)
+
+N_test <- length(uid_test)
+ps_test <- rep(0,N_test)
+ages_test <- rep(0,N_test)
+deltas_test <- rep(0,N_test)
+
+for (k in 1:N_test){
+  ps_test[k] <-  nhl_stats2_test %>% filter(Player == uid_test[k]) %>% select(PPG) %>% pull()  %>% list() 
+  ages_test[k]  <-   nhl_stats2_test %>% filter(Player == uid_test[k]) %>% select(Age)  %>% pull() %>% list() 
+  deltas_test[k] <-   nhl_stats2_test %>% filter(Player == uid_test[k]) %>% select(delta)  %>% pull() %>% list() 
+}
+
+df2_test <- tibble( uid_test, ps_test, ages_test, deltas_test)
+```
+
+```{r}
+#lfit = lm.fit(matrix(c(pc_score1,pc_score2), nrow=13),df2_test$ps_test[[10]] - mu)
+```
+
+```{r}
+pred_pace_test = predict(nhl_pca, df2_test$ps_test,df2_test$ages_test,K=2 )
+```
+
+```{r}
+ideal_list<-seq(18,34,by=1)
+temp = 0
+for(i in 1:N_test){
+  B = df_test$ages_test[[i]]
+  #print(B)
+  list1 = pred_pace_test$predCurves[i,][match(ideal_list,B)]
+  list2 = df_test$ps_test[[i]][match(ideal_list,B)]
+  
+  list1 = list1[!is.na(list1)]
+  list2 = list2[!is.na(list2)]
+  
+  error = sum(abs(list2-list1))
+  temp = temp + error
+}
+temp/N_test
+```
+
+
+```{r}
+l = 6 
+for (k in 1:200){
+  
+  lfit1 = lm.fit(matrix(c(pc_score1[0:l],pc_score2[0:l]), nrow=l),df2_test$ps_test[[k]][0:l] - mu[0:l])
+  pcs1 = lfit1$coefficients['x1']
+  pcs2 = lfit1$coefficients['x2']
+  
+  #print(sum(abs(lfit1$residuals)))
+  
+  lfit2 = lm.fit(matrix(c(pc_score1_soap[0:l],pc_score2_soap[0:l]), nrow=l),df2_test$ps_test[[k]][0:l] - mu_soap[0:l])
+  pcs1_soap = lfit2$coefficients['x1']
+  pcs2_soap = lfit2$coefficients['x2']
+  
+  #print(sum(abs(lfit2$residuals)))
+  
+  pred = pcs1*pc_score1[l:13] + pcs2*pc_score2[l:13] + mu[l:13]
+  
+  pred2 = pcs1_soap*pc_score1_soap[l:13] + pcs2_soap*pc_score2_soap[l:13] + mu_soap[l:13]
+  
+  pred3 = pred_pace_test$predCurves[k,][22:51]
+  
+plot(unlist(df2_test$ages_test[k]), unlist(df2_test$ps_test[k]), col=4, main = uid_test[k], ylim = c(-15,10), xlab = 'Age', ylab = 'PS')
+#plus imfunc#
+lines(seq(27,34,by=1),pred, col=2)
+lines(seq(27,34,by=1),pred2, col=3)
+lines(pred_pace_test$predGrid[22:51],pred3, col=1)
+legend(25,-2,c('PACE','ImFuncPCA', 'SOAP', 'Actual'),col=1:4,lty=1,lwd=5)
+#lines(pred_pace_test$predGrid, pred_pace_test$predCurves[k,], col=1)
+  
+}
+```
+
+
+
+
+
+
+
